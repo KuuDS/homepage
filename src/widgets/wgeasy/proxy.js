@@ -12,28 +12,54 @@ const sessionSIDCacheKey = `${proxyName}__sessionSID`;
 
 async function login(widget, service) {
   const url = formatApiCall(widgets[widget.type].api, { ...widget, endpoint: "session" });
-  const [, , , responseHeaders] = await httpProxy(url, {
-    method: "POST",
-    body: JSON.stringify({ password: widget.password }),
-    headers: {
-      "Content-Type": "application/json",
-    },
-  });
+
+  let sid = cache.get(`${sessionSIDCacheKey}.${service}`);
 
   try {
-    let connectSidCookie = responseHeaders["set-cookie"];
-    if (!connectSidCookie) {
-      const sid = cache.get(`${sessionSIDCacheKey}.${service}`);
-      if (sid) {
-        return sid;
+    // build params for GET /api/session
+    let params;
+    if (!sid) {
+      params = {};
+    } else {
+      params = {
+        Cookie: `connect.sid=${sid}`,
+      };
+    }
+
+    // GET /api/session to check if we need to login
+    const [, , data, responseHeaders] = await httpProxy(url, params);
+    const connectSidCookie = responseHeaders["set-cookie"];
+    // get sid from set-cookie if exists
+    if (connectSidCookie !== undefined) {
+      sid = connectSidCookie
+        .find((cookie) => cookie.startsWith("connect.sid="))
+        .split(";")[0]
+        .replace("connect.sid=", "");
+    }
+
+    // if not authenticated, do login with password
+    // always been authenticated if wg-easy not require password
+    const { authenticated } = JSON.parse(data);
+    if (!authenticated) {
+      // POST /api/session for authentication
+      const [status] = await httpProxy(url, {
+        method: "POST",
+        body: JSON.stringify({ password: widget.password }),
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `connect.sid=${sid}`,
+        },
+      });
+
+      // Return 401 if password is incorrect
+      if (status !== 200) {
+        throw new Error("Failed to authenticate, check your password");
       }
     }
-    connectSidCookie = connectSidCookie
-      .find((cookie) => cookie.startsWith("connect.sid="))
-      .split(";")[0]
-      .replace("connect.sid=", "");
-    cache.put(`${sessionSIDCacheKey}.${service}`, connectSidCookie);
-    return connectSidCookie;
+
+    // cache authenticated sid
+    cache.put(`${sessionSIDCacheKey}.${service}`, sid);
+    return sid;
   } catch (e) {
     logger.error(`Error logging into wg-easy, error: ${e}`);
     cache.del(`${sessionSIDCacheKey}.${service}`);
@@ -48,18 +74,19 @@ export default async function wgeasyProxyHandler(req, res) {
     const widget = await getServiceWidget(group, service);
 
     if (!widgets?.[widget.type]?.api) {
-      return res.status(403).json({ error: "Service does not support API calls" });
+      return res.status(403).json({ error: { message: "Service does not support API calls" } });
     }
 
     if (widget) {
       let sid = cache.get(`${sessionSIDCacheKey}.${service}`);
+
       if (!sid) {
         sid = await login(widget, service);
         if (!sid) {
-          return res.status(500).json({ error: "Failed to authenticate with Wg-Easy" });
+          return res.status(500).json({ error: { message: "Failed to authenticate with Wg-Easy" } });
         }
       }
-      const [, , data] = await httpProxy(
+      const [status, , data] = await httpProxy(
         formatApiCall(widgets[widget.type].api, { ...widget, endpoint: "wireguard/client" }),
         {
           headers: {
@@ -69,9 +96,16 @@ export default async function wgeasyProxyHandler(req, res) {
         },
       );
 
+      // evict cache if unauthorized
+      if (status !== 200) {
+        cache.del(`${sessionSIDCacheKey}.${service}`);
+        logger.error(`Unauthorized access to ${service}`);
+        return res.status(500).json({ error: { message: "Unauthorized access" } });
+      }
+
       return res.json(JSON.parse(data));
     }
   }
 
-  return res.status(400).json({ error: "Invalid proxy service type" });
+  return res.status(400).json({ error: { message: "Invalid proxy service type" } });
 }
