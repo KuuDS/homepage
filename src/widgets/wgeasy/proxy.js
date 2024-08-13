@@ -48,7 +48,7 @@ export default async function wgeasyProxyHandler(req, res) {
     const widget = await getServiceWidget(group, service);
 
     if (!widgets?.[widget.type]?.api) {
-      return res.status(403).json({ error: "Service does not support API calls" });
+      return res.status(403).json({ error: { message: "Service does not support API calls" } });
     }
 
     if (widget) {
@@ -56,7 +56,7 @@ export default async function wgeasyProxyHandler(req, res) {
       if (!sid) {
         sid = await login(widget, service);
         if (!sid) {
-          return res.status(500).json({ error: "Failed to authenticate with Wg-Easy" });
+          return res.status(500).json({ error: { message: "Failed to authenticate with Wg-Easy" } });
         }
       }
       const [, , data] = await httpProxy(
@@ -73,5 +73,5 @@ export default async function wgeasyProxyHandler(req, res) {
     }
   }
 
-  return res.status(400).json({ error: "Invalid proxy service type" });
+  return res.status(400).json({ error: { message: "Invalid proxy service type" } });
 }
